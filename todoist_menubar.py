@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import subprocess
+import textwrap
 import threading
 import time
 import traceback
@@ -85,6 +86,8 @@ LONG_BREAK_EVERY = CONFIG["long_break_every"]
 LOG_MIN_SECS = CONFIG["log_min_secs"]
 TITLE_CHARS = CONFIG["title_chars"]
 MENU_CHARS = 64
+DETAIL_CHARS = 60  # wrap width for the title and description at the top of a task's submenu
+DETAIL_LINES = 8
 DEFAULT_ICON = DEFAULTS["icon"]
 
 
@@ -281,13 +284,40 @@ class TodoistMenubar(rumps.App):
                 NSFontAttributeName: NSFont.menuFontOfSize_(11),
                 NSForegroundColorAttributeName: NSColor.systemRedColor() if overdue else NSColor.secondaryLabelColor(),
             }))
-        tooltip = "\n\n".join(filter(None, [clean(t["content"]), (t.get("description") or "").strip()[:600],
-                                            project and f"Project: {project}"]))
-        return text, attributed, tooltip
+        return text, attributed
+
+    @staticmethod
+    def _task_details(t):
+        """The full title (if the menu clips it) and the description, wrapped, for the top of the submenu.
+        A tooltip on the task would open over the submenu when the menu sits at the right of the screen."""
+        title = clean(t["content"])
+        lines = textwrap.wrap(title, DETAIL_CHARS) if len(title) > MENU_CHARS else []
+        notes = []
+        for para in LINK.sub(r"\1", t.get("description") or "").strip().splitlines():
+            notes += textwrap.wrap(para, DETAIL_CHARS) or [""]
+        while notes and not notes[-1]:
+            notes.pop()
+        if len(notes) > DETAIL_LINES:
+            notes = notes[:DETAIL_LINES]
+            notes[-1] = clip(notes[-1], DETAIL_CHARS - 1) + "…"
+        if not lines and not notes:
+            return None
+        attributed = NSMutableAttributedString.alloc().initWithString_attributes_(
+            "\n".join(lines), {NSFontAttributeName: NSFont.boldSystemFontOfSize_(12)})
+        if notes:
+            attributed.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+                ("\n" if lines else "") + "\n".join(notes),
+                {NSFontAttributeName: NSFont.menuFontOfSize_(11),
+                 NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}))
+        return attributed
 
     def _add_task(self, t, overdue):
-        text, attributed, tooltip = self._task_title(t, overdue)
-        parent = self._item(text, tooltip=tooltip, attributed=attributed)
+        text, attributed = self._task_title(t, overdue)
+        parent = self._item(text, attributed=attributed)
+        details = self._task_details(t)
+        if details:
+            self._item(details.string(), parent=parent, attributed=details)  # no callback, so not clickable
+            parent.add(rumps.separator)
         self._item("🍅 Focus", self.on_focus, t, parent=parent)
         self._item("✓ Complete", self.on_complete, t, parent=parent)
         parent.add(rumps.separator)
