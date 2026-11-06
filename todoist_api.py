@@ -57,6 +57,12 @@ def filter_tasks(query):
     return _paged("tasks/filter", {"query": query})
 
 
+def tasks_by_id(ids):
+    """Active tasks by id, e.g. the parents of subtasks that aren't in the filter"""
+    ids = list(ids)
+    return [t for i in range(0, len(ids), 100) for t in _paged("tasks", {"ids": ",".join(ids[i:i + 100])})]
+
+
 def projects():
     return {p["id"]: p["name"] for p in _paged("projects", {})}
 

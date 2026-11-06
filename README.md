@@ -8,6 +8,7 @@ Python with [rumps](https://github.com/jaredks/rumps) and PyObjC. Talks to the T
 
 - **Menu bar:** ☑️ and a count of tasks due today or overdue, plus `· N⚠︎` when some are overdue. The icon can be any emoji or image (see `icon` below).
 - **Menu:** Overdue and Today sections, sorted by priority (🔴 P1, 🟠 P2, 🔵 P3, ⚪️ P4), then date and time. Tasks with a "waiting for" label get 💤 and sink to the bottom. Overdue dates show in red. A task's submenu starts with its description, and its full title if the menu cuts it off.
+- **Subtasks:** a subtask whose parent is also in the section sits indented under it (↳), in the parent's place in the sort. A subtask shown without its parent names it in grey (↳ Parent) and at the top of its submenu. Completing a parent hides its subtasks too, as Todoist completes them.
 - **Each task has a submenu:** 🍅 Focus, ✓ Complete, → Today (overdue only), → Tomorrow (→ Mon on Fridays and weekends), Open in Todoist, and an optional custom command (see `task_command` below).
 - **⤵ Move N overdue to today**, in one go.
 - **⤳ Move N tasks left to tomorrow:** the end-of-day sweep. Moves every overdue and today task to the next working day, after a confirm.

@@ -88,6 +88,7 @@ TITLE_CHARS = CONFIG["title_chars"]
 MENU_CHARS = 64
 DETAIL_CHARS = 60  # wrap width for the title and description at the top of a task's submenu
 DETAIL_LINES = 8
+PARENT_CHARS = 28  # parent title in the grey meta of a subtask shown away from its parent
 DEFAULT_ICON = DEFAULTS["icon"]
 
 
@@ -185,7 +186,7 @@ class TodoistMenubar(rumps.App):
         super().__init__("Todoist", title=ICON_TEXT, icon=ICON, template=bool(CONFIG["icon_template"]),
                          quit_button=None)
         # Replaced whole by the fetch thread, read on the main thread
-        self.snapshot = {"tasks": [], "projects": {}, "updated": None, "error": None}
+        self.snapshot = {"tasks": [], "projects": {}, "parents": {}, "updated": None, "error": None}
         self.hidden = set()  # ids completed or moved locally, hidden until the next fetch confirms it
         self.wake = threading.Event()
         self.focus = self.load_focus()
@@ -224,10 +225,53 @@ class TodoistMenubar(rumps.App):
             projects = self.snapshot["projects"] or todoist_api.projects()
             tasks = todoist_api.filter_tasks(QUERY)
             self.hidden &= {t["id"] for t in tasks}  # forget ids the server no longer returns
-            self.snapshot = {"tasks": tasks, "projects": projects, "updated": time.time(), "error": None}
+            parents = self.parent_names(tasks)
+            self.snapshot = {"tasks": tasks, "projects": projects, "parents": parents,
+                             "updated": time.time(), "error": None}
         except Exception as e:
             traceback.print_exc()
             self.snapshot = {**self.snapshot, "error": str(e)}
+
+    def parent_names(self, tasks):
+        """{parent id: title} for every subtask's parent, looking up parents that aren't in the list.
+        A failed lookup keeps the names from the last fetch rather than failing the refresh."""
+        names = {t["id"]: clean(t["content"]) for t in tasks}
+        wanted = {t["parent_id"] for t in tasks if t.get("parent_id")}
+        missing = wanted - set(names)
+        if missing:
+            try:
+                names.update((t["id"], clean(t["content"])) for t in todoist_api.tasks_by_id(missing))
+            except Exception:
+                traceback.print_exc()
+                names.update((k, v) for k, v in self.snapshot.get("parents", {}).items() if k in missing)
+        return {k: v for k, v in names.items() if k in wanted}
+
+    @staticmethod
+    def nested(tasks):
+        """[(task, depth)]: subtasks move under their parent when it's in the same list, in sorted order"""
+        ids = {t["id"] for t in tasks}
+        children = {}
+        for t in tasks:
+            if t.get("parent_id") in ids:
+                children.setdefault(t["parent_id"], []).append(t)
+        out = []
+
+        def walk(t, depth):
+            out.append((t, depth))
+            for c in children.get(t["id"], []):
+                walk(c, depth + 1)
+        for t in tasks:
+            if t.get("parent_id") not in ids:
+                walk(t, 0)
+        return out
+
+    def descendants(self, task_id):
+        """Ids of a task's subtasks in the list, at any depth (completing a parent completes them)"""
+        found, frontier = set(), {task_id}
+        while frontier:
+            frontier = {t["id"] for t in self.snapshot["tasks"] if t.get("parent_id") in frontier} - found
+            found |= frontier
+        return found
 
     def refresh_soon(self):
         self.wake.set()
@@ -266,7 +310,8 @@ class TodoistMenubar(rumps.App):
         menu.add(item)
         return item
 
-    def _task_title(self, t, overdue):
+    def _task_title(self, t, overdue, parent=None):
+        """parent: the parent's title, for a subtask shown away from its parent"""
         date, at = todoist_api.local_due(t["due"])
         when = []
         if overdue:
@@ -276,7 +321,8 @@ class TodoistMenubar(rumps.App):
         project = self.snapshot["projects"].get(t["project_id"], "")
         prefix = ("💤 " if self.waiting(t) else "") + PRIORITY.get(t["priority"], "")
         text = f"{prefix} {clip(clean(t['content']), MENU_CHARS)}"
-        meta = "   " + " · ".join(when + ([project] if project and project != PROJECT else []))
+        meta = "   " + " · ".join(when + ([project] if project and project != PROJECT else [])
+                                  + ([f"↳ {clip(parent, PARENT_CHARS)}"] if parent else []))
         attributed = NSMutableAttributedString.alloc().initWithString_attributes_(
             text, {NSFontAttributeName: NSFont.menuFontOfSize_(0)})
         if meta.strip():
@@ -287,12 +333,15 @@ class TodoistMenubar(rumps.App):
         return text, attributed
 
     @staticmethod
-    def _task_details(t):
-        """The full title (if the menu clips it) and the description, wrapped, for the top of the submenu.
+    def _task_details(t, parent=None):
+        """The full title (if the menu clips it), the parent (for a subtask shown away from it) and the
+        description, wrapped, for the top of the submenu.
         A tooltip on the task would open over the submenu when the menu sits at the right of the screen."""
         title = clean(t["content"])
         lines = textwrap.wrap(title, DETAIL_CHARS) if len(title) > MENU_CHARS else []
-        notes = []
+        notes = textwrap.wrap(f"Part of: {parent}", DETAIL_CHARS) if parent else []
+        if parent and t.get("description"):
+            notes.append("")
         for para in LINK.sub(r"\1", t.get("description") or "").strip().splitlines():
             notes += textwrap.wrap(para, DETAIL_CHARS) or [""]
         while notes and not notes[-1]:
@@ -311,10 +360,14 @@ class TodoistMenubar(rumps.App):
                  NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}))
         return attributed
 
-    def _add_task(self, t, overdue):
-        text, attributed = self._task_title(t, overdue)
+    def _add_task(self, t, overdue, depth=0):
+        """depth > 0: a subtask under its parent, indented. A subtask at depth 0 names its parent instead."""
+        parent_name = self.snapshot.get("parents", {}).get(t.get("parent_id")) if depth == 0 else None
+        text, attributed = self._task_title(t, overdue, parent_name)
+        if depth:
+            text, attributed = self._indent(text, attributed, depth)
         parent = self._item(text, attributed=attributed)
-        details = self._task_details(t)
+        details = self._task_details(t, parent_name)
         if details:
             self._item(details.string(), parent=parent, attributed=details)  # no callback, so not clickable
             parent.add(rumps.separator)
@@ -329,6 +382,17 @@ class TodoistMenubar(rumps.App):
         if CONFIG["task_command"]:
             self._item(CONFIG["task_command_label"], self.on_command, t, parent=parent,
                        tooltip=f"Opens a new {CONFIG['terminal']} tab running: {CONFIG['task_command']}")
+
+    @staticmethod
+    def _indent(text, attributed, depth):
+        """Indent a subtask with a grey ↳. Leading spaces rather than NSMenuItem indentation, which is too
+        slight to read and doesn't line the ↳ up under the parent's priority dot."""
+        pad = "    " * depth
+        lead = NSMutableAttributedString.alloc().initWithString_attributes_(
+            f"{pad[:-1]}↳ ", {NSFontAttributeName: NSFont.menuFontOfSize_(0),
+                              NSForegroundColorAttributeName: NSColor.tertiaryLabelColor()})
+        lead.appendAttributedString_(attributed)
+        return lead.string(), lead
 
     def build_menu(self):
         self.menu.clear()
@@ -359,16 +423,16 @@ class TodoistMenubar(rumps.App):
 
         if overdue:
             self._item(f"Overdue ({len(overdue)})")
-            for t in overdue:
-                self._add_task(t, True)
+            for t, depth in self.nested(overdue):
+                self._add_task(t, True, depth)
             self._item(f"⤵ Move {len(overdue)} overdue to today", self.on_move_overdue,
                        tooltip="Keeps times and recurrence")
             self.menu.add(rumps.separator)
 
         if snap["updated"] is not None:
             self._item(f"Today ({len(due_today)})")
-            for t in due_today:
-                self._add_task(t, False)
+            for t, depth in self.nested(due_today):
+                self._add_task(t, False, depth)
             if not due_today:
                 self._item("    Nothing left today 🎉")
             left = overdue + due_today
@@ -421,7 +485,8 @@ class TodoistMenubar(rumps.App):
             if log:
                 self._log(task["id"], log)
             todoist_api.close(task["id"])
-        self._background(work, [task["id"]], f"Couldn't complete \"{clip(clean(task['content']), 40)}\"")
+        # Todoist completes the subtasks with the parent
+        self._background(work, [task["id"], *self.descendants(task["id"])], f"Couldn't complete \"{clip(clean(task['content']), 40)}\"")
 
     def on_complete(self, sender):
         self.complete(sender.task)
